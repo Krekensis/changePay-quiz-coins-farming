@@ -2,7 +2,8 @@
 
 An automated Python script designed specifically for students at **MAHE Bengaluru Campus** to passively farm quiz coins in the ChangePay Android application.
 
-> **⚠️ Disclaimer:** This script is provided for educational purposes only (not really). Use it responsibly.
+> [!WARNING]
+> This script is provided for educational purposes only (not really). Use it responsibly.
 
 ---
 
