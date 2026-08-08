@@ -1,0 +1,13 @@
+{
+    "target_package": "in.changepay.customerAndroidApp",
+    "waits": {
+        "main_loop_poll": 0.3,
+        "app_unfocused_retry": 3.0,
+        "unknown_page_retry": 2.0,
+        "error_recovery": 5.0,
+        "normal_click": 0.3,
+        "quiz_option_select": 0.1,
+        "quiz_loading_transition": 1.5,
+        "home_loading_transition": 0.5
+    }
+}
