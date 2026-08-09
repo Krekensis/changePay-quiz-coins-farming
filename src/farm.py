@@ -4,6 +4,7 @@ import time
 import json
 import argparse
 import xml.etree.ElementTree as ET
+import re
 
 os.system('')
 
@@ -48,14 +49,17 @@ CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__fil
 DEFAULT_CONFIG = {
     "target_package": "in.changepay.customerAndroidApp",
     "waits": {
-        "main_loop_poll": 0.3,
+        "main_loop_poll": 0.05,
         "app_unfocused_retry": 3.0,
         "unknown_page_retry": 2.0,
         "error_recovery": 5.0,
-        "normal_click": 0.3,
-        "quiz_option_select": 0.1,
-        "quiz_loading_transition": 1.5,
-        "home_loading_transition": 0.5
+        "normal_click": 0.05,
+        "quiz_option_select": 0.05,
+        "quiz_loading_transition": 1.0,
+        "home_loading_transition": 0.05,
+        "app_check_interval": 1.0,
+        "quiz_advance_timeout": 1.0,
+        "quiz_advance_poll": 0.03
     }
 }
 
@@ -75,25 +79,38 @@ except Exception as e:
 CONFIG = DEFAULT_CONFIG
 TARGET_PACKAGE = CONFIG["target_package"]
 
-def get_current_page(xml_dump):
-    """Identifies the current page based on compound content-desc checks."""
+def parse_hierarchy(xml_dump):
+    """Parse a UI hierarchy once so all state checks can reuse it."""
     try:
-        root = ET.fromstring(xml_dump)
+        return ET.fromstring(xml_dump)
     except ET.ParseError:
         return None
-        
-    descs = [n.get('content-desc', '') for n in root.iter('node') if n.get('content-desc')]
-    
-    def has_desc(text):
-        return any(text in d for d in descs)
-        
-    def has_exact(text):
-        return any(text == d for d in descs)
 
-    if has_desc("Topic") and has_desc("questions correctly!"):
+
+def get_current_page(root):
+    """Identifies the page with one traversal of the parsed hierarchy."""
+    if root is None:
+        return None
+
+    exact_descs = set()
+    has_topic = has_correct = has_recommended = has_mahe = False
+    for node in root.iter("node"):
+        desc = node.get("content-desc")
+        if not desc:
+            continue
+        exact_descs.add(desc)
+        has_topic |= "Topic" in desc
+        has_correct |= "questions correctly!" in desc
+        has_recommended |= "Recommended for you" in desc
+        has_mahe |= "MAHE Bengaluru" in desc
+
+    def has_exact(text):
+        return text in exact_descs
+
+    if has_topic and has_correct:
         return "09"
         
-    if (has_exact("Next") or has_exact("Done")) and not has_desc("questions correctly!") and not has_desc("Topic"):
+    if (has_exact("Next") or has_exact("Done")) and not has_correct and not has_topic:
         return "08"
         
     if has_exact("Choose difficulty level") and has_exact(".. EASY") and has_exact("Dismiss"):
@@ -114,7 +131,7 @@ def get_current_page(xml_dump):
     if has_exact("Games") and has_exact("ChangePay Quiz"):
         return "02"
         
-    if has_desc("Recommended for you") and has_desc("MAHE Bengaluru"):
+    if has_recommended and has_mahe:
         return "01"
         
     return None
@@ -143,45 +160,64 @@ def click_desc(d, desc_text, contains=False):
         Log.warn(f"Element not found -> '{log_text}'")
         return False
 
-def handle_quiz_question(d, xml_dump):
-    """Finds the 4 answer options, picks the longest, clicks it, then clicks Next."""
-    try:
-        root = ET.fromstring(xml_dump)
-    except ET.ParseError:
+BOUNDS_RE = re.compile(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]")
+
+
+def tap_node(d, node, label):
+    """Tap a node from the existing XML dump, avoiding a selector RPC."""
+    match = BOUNDS_RE.fullmatch(node.get("bounds", ""))
+    if not match:
+        Log.warn(f"No usable bounds for '{truncate_log(label)}'")
         return False
-        
-    options = []
+
+    left, top, right, bottom = map(int, match.groups())
+    if right <= left or bottom <= top:
+        Log.warn(f"Invalid bounds for '{truncate_log(label)}'")
+        return False
+
+    d.click((left + right) // 2, (top + bottom) // 2)
+    Log.action(f"Clicked -> '{truncate_log(label)}'")
+    return True
+
+
+def find_quiz_advance_button(root):
+    """Return the Next or Done button from a parsed hierarchy, if present."""
+    if root is None:
+        return None
+    for node in root.iter("node"):
+        if (node.get("class") == "android.widget.Button"
+                and node.get("content-desc") in ("Next", "Done")):
+            return node
+    return None
+
+
+def handle_quiz_question(d, root):
+    """Pick the longest answer and advance using nodes from UI hierarchy dumps."""
+    longest_option = None
     for node in root.iter("node"):
         if node.get("class") == "android.view.View" and node.get("clickable", "false").lower() == "true":
             desc = node.get("content-desc", "")
-            if desc:
-                options.append(desc)
-                
-    if not options:
+            if desc and (longest_option is None or len(desc) > len(longest_option.get("content-desc"))):
+                longest_option = node
+
+    if longest_option is None:
         Log.warn("No answer options found!")
         return False
-        
-    longest_option = max(options, key=len)
-    log_text = truncate_log(longest_option)
-    Log.info(f"Selected longest answer: ({len(longest_option)} chars).")
-    
-    click_desc(d, longest_option)
-    time.sleep(CONFIG["waits"]["quiz_option_select"])
-    
-    next_btn = d(className="android.widget.Button", description="Next")
-    done_btn = d(className="android.widget.Button", description="Done")
-    
-    if next_btn.exists:
-        next_btn.click()
-        Log.action("Clicked -> 'Next'")
-        return True
-    elif done_btn.exists:
-        done_btn.click()
-        Log.action("Clicked -> 'Done'")
-        return True
-    else:
-        Log.warn("Neither Next nor Done button was found!")
+
+    answer = longest_option.get("content-desc")
+    Log.info(f"Selected longest answer: ({len(answer)} chars).")
+    if not tap_node(d, longest_option, answer):
         return False
+
+    deadline = time.monotonic() + CONFIG["waits"]["quiz_advance_timeout"]
+    while time.monotonic() < deadline:
+        time.sleep(CONFIG["waits"]["quiz_advance_poll"])
+        advance = find_quiz_advance_button(parse_hierarchy(d.dump_hierarchy()))
+        if advance is not None:
+            return tap_node(d, advance, advance.get("content-desc"))
+
+    Log.warn("Neither Next nor Done button was found before timeout!")
+    return False
 
 def main():
     parser = argparse.ArgumentParser(description="ChangePay Quiz Farming Bot")
@@ -198,6 +234,7 @@ def main():
         
     runs_completed = 0
     max_runs = args.runs
+    next_app_check = 0.0
     
     Log.info(f"Starting automation. Target runs: {'Infinite' if max_runs == 0 else max_runs}")
     print(f"{Log.BOLD}Press Ctrl+C to stop.{Log.RESET}")
@@ -212,14 +249,19 @@ def main():
                     
                 time.sleep(CONFIG["waits"]["main_loop_poll"])
                 
-                current_app = d.app_current()
-                if current_app.get('package') != TARGET_PACKAGE:
-                    Log.warn(f"ChangePay app is not open! (Current: {current_app.get('package')}). Waiting...")
-                    time.sleep(CONFIG["waits"]["app_unfocused_retry"])
-                    continue
+                now = time.monotonic()
+                if now >= next_app_check:
+                    current_app = d.app_current()
+                    next_app_check = now + CONFIG["waits"]["app_check_interval"]
+                    if current_app.get('package') != TARGET_PACKAGE:
+                        Log.warn(f"ChangePay app is not open! (Current: {current_app.get('package')}). Waiting...")
+                        time.sleep(CONFIG["waits"]["app_unfocused_retry"])
+                        next_app_check = 0.0
+                        continue
                 
                 xml_dump = d.dump_hierarchy()
-                current_page = get_current_page(xml_dump)
+                root = parse_hierarchy(xml_dump)
+                current_page = get_current_page(root)
                 
                 if not current_page:
                     Log.warn("Unknown page or loading. Waiting...")
@@ -247,7 +289,7 @@ def main():
                     if clicked:
                         time.sleep(CONFIG["waits"]["quiz_loading_transition"])
                 elif current_page == "08":
-                    clicked = handle_quiz_question(d, xml_dump)
+                    clicked = handle_quiz_question(d, root)
                 elif current_page == "09":
                     clicked = click_desc(d, "Exit")
                     if clicked:
