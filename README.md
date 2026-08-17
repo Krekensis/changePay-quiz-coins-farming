@@ -1,4 +1,4 @@
-# ChangePay Quiz Coins Farmer (Last updated 09/08/26)
+# ChangePay Quiz Coins Farmer (Last updated 09/08/26) [OUTDATED]
 
 An automated Python script designed specifically for students at **MAHE Bengaluru Campus** to passively farm quiz coins in the ChangePay Android application.
 
